@@ -3,9 +3,8 @@ library(tidyverse)
 library(stringr)
 library(tidytext)
 library(quanteda)
+library(topicmodels)
 
-##--set working directory
-setwd("C:/Users/EJones1/Data Science Accelerator")
 
 ##--import datasets
 sd_outcomes_report <- read.csv("sd_outcomes_report.csv") #QSIS front end report = general and risk comments
@@ -36,7 +35,7 @@ common_words <- sd_outcomes_tidy %>%
 
 sd_dtm <- sd_outcomes_tidy %>%
   anti_join(stop_words, by = c("token"="word")) %>%
-  filter(str_detect(token, "div|li|br|nbsp|â") != TRUE) %>%
+  filter(str_detect(token, "div|li|br|nbsp|?") != TRUE) %>%
   count(id, token) %>%
   cast_dtm(document = id, term = token, n)
 
