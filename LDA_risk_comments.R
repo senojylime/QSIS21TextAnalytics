@@ -5,6 +5,7 @@ library(tidytext)
 library(quanteda)
 library(topicmodels)
 library(textmineR)
+library(lubridate)
 
 #set working directory
 setwd("C:/Users/EJones1/Data Science Accelerator")
@@ -32,54 +33,6 @@ common_words <- sd_tidy %>%
 sd_tidy <- sd_tidy %>%
   anti_join(common_words) %>%
   filter(str_detect(word,"patient|trusts|register|services|nhs*") == FALSE)
-
-#create DocumentTermMatrix
-sd_dtm <- sd_tidy %>%
-  count(doc, word) %>%
-  cast_dtm(document = doc, term = word, n)
-
-#####topic models package
-# set a seed so that the output of the model is repeatable
-sd_lda <- LDA(sd_dtm, k = 40, control = list(seed = 1234))
-
-#Look at the beta values of words
-#beta is the probability that a word will appear in that topic
-sd_topics <- tidy(sd_lda, matrix = "beta")
-
-sd_top_terms <- sd_topics %>%
-  group_by(topic) %>%
-  slice_max(beta, n = 5) %>% 
-  ungroup() %>%
-  arrange(topic, -beta)
-
-sd_top_terms %>%
-  mutate(term = reorder_within(term, beta, topic)) %>%
-  ggplot(aes(beta, term, fill = factor(topic))) +
-  geom_col(show.legend = FALSE) +
-  facet_wrap(~ topic, scales = "free") +
-  scale_y_reordered()
-
-# gamma is the percentage of words in a document per topic
-# table of comments and their top 4 topics
-# maybe only keep the topics if they have above a certain gamma score?                          
-sd_gamma_topic <- tidy(sd_lda, matrix = "gamma") %>%
-  group_by(document) %>%
-  slice_max(order_by = gamma, n = 4) %>%
-  left_join(risk_docs, by = c("document"="doc"))
-
-sd_gamma_topic %>%
-  group_by(document) %>%
-  mutate(sum = sum(gamma),
-         topic_proportion = gamma/sum*100) %>%
-  separate(document, into = c("team_id","publish_on"), sep = " ") %>%
-  mutate(team_id = as.integer(team_id)) %>%
-  left_join(qsis_self_declarations, by = "team_id") %>%
-  distinct(team_id,publish_on.x,topic,gamma,pr_risk_comments.x,sum,topic_proportion,score,poc,crg,service_name,subservice_name,team_name) %>%
-  filter(service_name == "Adult Critical Care") %>%
-  ggplot(aes(x=team_name, y=topic_proportion)) +
-  geom_col(aes(fill = as.factor(topic)),position = "stack", show.legend = FALSE) +
-  geom_text(aes(label = topic), position = position_stack(vjust = 0.5)) +
-  coord_flip()
 
 #### textmineR package
 for_dtm <- qsis_self_declarations %>%
@@ -160,4 +113,27 @@ model$summary[ order(model$summary$prevalence, decreasing = TRUE) , ][ 1:10 , ]
 
 model_df <- as.data.frame(model$summary[ order(model$summary$prevalence, decreasing = TRUE) , ])
 
-#But how do I know which topics apply to which comments??
+# predict on held-out documents using gibbs sampling "fold in"
+gibbs_prediction <- predict(model, dtm, method = "gibbs",
+              iterations = 200, burnin = 175)
+
+# predict on held-out documents using the dot product method
+dot_prediction <- predict(model, dtm, method = "dot")
+
+# compare the methods
+barplot(rbind(p1[1,],p2[1,]), beside = TRUE, col = c("red", "blue"))
+
+gibbs_prediction <- as.data.frame(gibbs_prediction)
+gibbs_prediction$doc_id <- rownames(gibbs_prediction) 
+modelled_comments <- pivot_longer(gibbs_prediction, -doc_id ,names_to = "topic", values_to = "score") %>%
+  left_join(model_df, by = "topic") %>%
+  left_join(risk_docs, by = c("doc_id"="doc")) %>%
+  group_by(doc_id) %>%
+  slice_max(order_by = score, n = 3) %>%
+  mutate(sum = sum(score),
+         topic_proportion = score/sum*100,
+         publish_on = dmy(publish_on),
+         year = year(publish_on))
+  
+  
+
