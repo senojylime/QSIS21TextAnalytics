@@ -3,16 +3,16 @@ get_toppiccy_words <- function(doc_vector, model, top_n){
   
   pred <- predict(model, doc_vector, method = "dot")
   
-  top3classes = order(pred,decreasing=TRUE)[0:top_n]
+  topnclasses = order(pred,decreasing=TRUE)[0:top_n]
   
-  top3classes_dis = model$phi[top3classes,]
+  topnclasses_dis = model$phi[topnclasses,]
   
   #R doesnt broadcast word vector into a matrix when you multply vector
-  # by a matrix??. So here i stack the word vector 3 times (once per class)
-  word_vectors = rbind(test_word_vector, test_word_vector,test_word_vector)
+  # by a matrix??. So here i stack the word vector top_n times
+  word_vectors = t(replicate(top_n,test_word_vector))
   
   #Elementwise multiplication of both matrices (theyre now the same shape)
-  highest_prob_words = top3classes_dis * word_vectors 
+  highest_prob_words = topnclasses_dis * word_vectors 
   
   sort_tokens <- function(word_dis){
     colnames(highest_prob_words)[order(word_dis, decreasing=TRUE)[0:5]]
