@@ -1,4 +1,3 @@
-
 library(tidyverse)
 library(stringr)
 library(tidytext)
@@ -6,134 +5,112 @@ library(quanteda)
 library(topicmodels)
 library(textmineR)
 library(lubridate)
+library(ngram)
 
-#set working directory
-setwd("C:/Users/EJones1/Data Science Accelerator")
+source("C:/Users/EJones1/Data Science Accelerator/QSIS21TextAnalytics/functions/get_most_toppiccy_words.R")
 
-#import self declaration dataset
-qsis_self_declarations <- read.csv("qsis_self_declarations.csv")
+qsis_self_declarations <- read.csv("C:/Users/EJones1/Data Science Accelerator/qsis_self_declarations.csv")
+
+team_info <- qsis_self_declarations %>%
+  distinct(team_id,team_name,subservice_name,service_name, crg,poc) %>%
+  mutate(service = paste(service_name,subservice_name))
 
 risk_docs <- qsis_self_declarations %>%
-  distinct(team_id,publish_on,pr_risk_comments) %>%
+  distinct(service_name,team_id,publish_on,pr_risk_comments) %>%
   na.omit() %>%
-  mutate(doc = paste(team_id,publish_on))
-  
+  mutate(doc = paste(team_id,publish_on),
+         word_count = sapply(strsplit(pr_risk_comments, " "), length))
+
 #tidy the dataset, tokenise and remove general stop words
-sd_tidy <-  risk_docs%>%
+sd_tidy <-  risk_docs %>%
   unnest_tokens(word, pr_risk_comments, "words", drop = FALSE) %>%
   anti_join(stop_words)
 
-#Get a list of the most common words
+# #Get a list of the most common words
 common_words <- sd_tidy %>%
   count(word) %>%
   slice_max(order_by = n, n = 10) %>%
   filter(word != "mdt")
 
-#remove common words and domain stop words
-sd_tidy <- sd_tidy %>%
-  anti_join(common_words) %>%
-  filter(str_detect(word,"patient|trusts|register|services|nhs*") == FALSE)
-
-#### textmineR package
-for_dtm <- qsis_self_declarations %>%
+for_dtm <- sd_tidy %>%
+  filter(word_count > 3 & !(word %in% c("quoracy","capacity","recruitment","theatre","palliative","locum","staff","transport","data","staffing",
+                                        "attendance","itc","pathology","nurse","validation","lack"))) %>%
+  filter(str_detect(pr_risk_comments, "No patient related risk|no risk|no known patient risk") == FALSE) %>%
+  anti_join(common_words, by = "word") %>%
   distinct(team_id,publish_on,pr_risk_comments) %>%
   na.omit() %>%
   mutate(doc = paste(team_id,publish_on))
 
+#create document term matrix
 dtm <- CreateDtm(doc_vec = for_dtm$pr_risk_comments, # character vector of documents
                  doc_names = for_dtm$doc, # document names
-                 ngram_window = c(1, 3), # minimum and maximum n-gram length
+                 ngram_window = c(1,2), # minimum and maximum n-gram length
                  stopword_vec = c(stopwords::stopwords("en"), # stopwords from tm
                                   stopwords::stopwords(source = "smart"),
-                                  common_words,
-                                  c("patient","trusts","register","services","nhs","nhse","nhsei","nhsi")), # this is the default value
+                                  c("patient","patients","trusts","trust",
+                                    "risk","risks","register","service","services","nhs","nhse","nhsei",
+                                    "oncology","unit","north","south","east","west","cumbria","bristol","identified")), 
                  lower = TRUE, # lowercase - this is the default value
                  remove_punctuation = TRUE, # punctuation - this is the default
                  remove_numbers = TRUE, # numbers - this is the default
                  verbose = FALSE, # Turn off status bar for this demo
                  cpus = 2) # default is all available cpus on the system
 
-dtm <- dtm[,colSums(dtm) > 2]
+dtm <- dtm[,colSums(dtm) > 2] #I can't remember what this is for?
 
+#fit an LDA model
 set.seed(12345)
 
 model <- FitLdaModel(dtm = dtm, 
-                     k = 75,
+                     k = 30,
                      iterations = 500, # I usually recommend at least 500 iterations or more
-                     burnin = 180,
+                     burnin = 100,
                      alpha = 0.1,
                      beta = 0.05,
                      optimize_alpha = TRUE,
                      calc_likelihood = TRUE,
                      calc_coherence = TRUE,
                      calc_r2 = TRUE,
-                     cpus = 2) 
+                     cpus = 2)
 
-# R-squared 
-# - only works for probabilistic models like LDA and CTM
-model$r2
+# predict topics contained in each document
+prediction <- predict(model, dtm, method = "dot")
+prediction <- as.data.frame(prediction)
+prediction$doc_id <- rownames(prediction)
 
-# log Likelihood (does not consider the prior) 
-plot(model$log_likelihood, type = "l")
+#get toppicy words from comment
+topiccy_words <-  apply(dtm ,1, FUN = get_topiccy_words, model=model, top_n=3)
 
-summary(model$coherence)
+long_topiccy_words <- as.data.frame(topiccy_words) %>%
+  mutate(topic_n = c(1,1,1,1,1,2,2,2,2,2,3,3,3,3,3)) %>%
+  pivot_longer(!topic_n, names_to = "doc_id", values_to = "topiccy_words") %>%
+  group_by(topic_n,doc_id) %>%
+  summarise(topiccy_words = toString(topiccy_words))
 
-hist(model$coherence, 
-     col= "blue", 
-     main = "Histogram of probabilistic coherence")
-
-# Get the top terms of each topic
-model$top_terms <- GetTopTerms(phi = model$phi, M = 5)
-
-# Get the prevalence of each topic
-# You can make this discrete by applying a threshold, say 0.05, for
-# topics in/out of docuemnts. 
-model$prevalence <- colSums(model$theta) / sum(model$theta) * 100
-
-# prevalence should be proportional to alpha
-plot(model$prevalence, model$alpha, xlab = "prevalence", ylab = "alpha")
-
-# textmineR has a naive topic labeling tool based on probable bigrams
-model$labels <- LabelTopics(assignments = model$theta > 0.05, 
-                            dtm = dtm,
-                            M = 1)
-
-head(model$labels)
-
-# put them together, with coherence into a summary table
-model$summary <- data.frame(topic = rownames(model$phi),
-                            label = model$labels,
-                            coherence = round(model$coherence, 3),
-                            prevalence = round(model$prevalence,3),
-                            top_terms = apply(model$top_terms, 2, function(x){
-                              paste(x, collapse = ", ")
-                            }),
-                            stringsAsFactors = FALSE)
-model$summary[ order(model$summary$prevalence, decreasing = TRUE) , ][ 1:10 , ]
-
-model_df <- as.data.frame(model$summary[ order(model$summary$prevalence, decreasing = TRUE) , ])
-
-# predict on held-out documents using gibbs sampling "fold in"
-gibbs_prediction <- predict(model, dtm, method = "gibbs",
-              iterations = 200, burnin = 175)
-
-# predict on held-out documents using the dot product method
-dot_prediction <- predict(model, dtm, method = "dot")
-
-# compare the methods
-barplot(rbind(p1[1,],p2[1,]), beside = TRUE, col = c("red", "blue"))
-
-gibbs_prediction <- as.data.frame(gibbs_prediction)
-gibbs_prediction$doc_id <- rownames(gibbs_prediction) 
-modelled_comments <- pivot_longer(gibbs_prediction, -doc_id ,names_to = "topic", values_to = "score") %>%
-  left_join(model_df, by = "topic") %>%
-  left_join(risk_docs, by = c("doc_id"="doc")) %>%
+#get results from prediction and add back on metadata
+modelled_comments <- pivot_longer(prediction, -doc_id ,names_to = "topic", values_to = "probability") %>%
   group_by(doc_id) %>%
-  slice_max(order_by = score, n = 3) %>%
-  mutate(sum = sum(score),
-         topic_proportion = score/sum*100,
-         publish_on = dmy(publish_on),
-         year = year(publish_on))
-  
-  
+  arrange(-probability) %>%
+  mutate(topic_n = row_number()) %>%
+  ungroup() %>%
+  left_join(risk_docs, by = c("doc_id"="doc")) %>%
+  left_join(team_info, by = "team_id") %>%
+  mutate(publish_on = dmy(publish_on),
+         year = year(publish_on)) %>%
+  select(-service_name.y) %>%
+  rename("service_name" = service_name.x) %>%
+  left_join(long_topiccy_words, by = c("doc_id", "topic_n")) %>%
+  ungroup()
+write.csv(modelled_comments,"data/modelled_comments30.csv")
 
+#create summary of model
+model_summary <- SummarizeTopics(model)
+write.csv(model_summary, "data/model_summary.csv")
+
+#topics by service
+topics_by_service <- modelled_comments %>%
+  select(service,year,topic,probability) %>%
+  group_by(service,year,topic) %>%
+  mutate(probability = sum(probability)) %>%
+  distinct()
+write.csv(topics_by_service, "data/topics_by_service.csv")
