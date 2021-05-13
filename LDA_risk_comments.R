@@ -6,6 +6,9 @@ library(topicmodels)
 library(textmineR)
 library(lubridate)
 library(ngram)
+library(maps)
+
+setwd("C:/Users/EJones1/Data Science Accelerator/QSIS21TextAnalytics")
 
 source("functions/get_most_toppiccy_words.R")
 
@@ -13,13 +16,14 @@ qsis_self_declarations <- read.csv("data/qsis_self_declarations.csv")
 
 team_info <- qsis_self_declarations %>%
   distinct(team_id,team_name,subservice_name,service_name, crg,poc) %>%
-  mutate(service = paste(service_name,subservice_name))
+  mutate(service = str_replace(paste(service_name,subservice_name),"NA","")) #concatenate service & subservice then remove NA where no subservice
 
 risk_docs <- qsis_self_declarations %>%
   distinct(service_name,team_id,publish_on,pr_risk_comments) %>%
   na.omit() %>%
   mutate(doc = paste(team_id,publish_on),
-         word_count = sapply(strsplit(pr_risk_comments, " "), length))
+         word_count = sapply(strsplit(pr_risk_comments, " "), length),
+         pr_risk_comments = paste(service_name,pr_risk_comments)) #if we include the service name in the comment does it improve the nodelling?
 
 #tidy the dataset, tokenise and remove general stop words
 sd_tidy <-  risk_docs %>%
@@ -35,7 +39,7 @@ common_words <- sd_tidy %>%
 for_dtm <- sd_tidy %>%
   filter(word_count > 3 & !(word %in% c("quoracy","capacity","recruitment","theatre","palliative","locum","staff","transport","data","staffing",
                                         "attendance","itc","pathology","nurse","validation","lack"))) %>%
-  filter(str_detect(pr_risk_comments, "No patient related risk|no risk|no known patient risk") == FALSE) %>%
+  filter(str_detect(pr_risk_comments, "No patient related risk|no risk*|no known patient risk") == FALSE) %>%
   anti_join(common_words, by = "word") %>%
   distinct(team_id,publish_on,pr_risk_comments) %>%
   na.omit() %>%
@@ -49,7 +53,8 @@ dtm <- CreateDtm(doc_vec = for_dtm$pr_risk_comments, # character vector of docum
                                   stopwords::stopwords(source = "smart"),
                                   c("patient","patients","trusts","trust",
                                     "risk","risks","register","service","services","nhs","nhse","nhsei",
-                                    "oncology","unit","north","south","east","west","cumbria","bristol","identified")), 
+                                    "oncology","unit","north","south","east","west","cumbria","bristol","identified"),
+                                  world.cities$name), 
                  lower = TRUE, # lowercase - this is the default value
                  remove_punctuation = TRUE, # punctuation - this is the default
                  remove_numbers = TRUE, # numbers - this is the default
@@ -62,7 +67,7 @@ dtm <- dtm[,colSums(dtm) > 2] #I can't remember what this is for?
 set.seed(12345)
 
 model <- FitLdaModel(dtm = dtm, 
-                     k = 30,
+                     k = 25,
                      iterations = 500, # I usually recommend at least 500 iterations or more
                      burnin = 100,
                      alpha = 0.1,
@@ -101,7 +106,7 @@ modelled_comments <- pivot_longer(prediction, -doc_id ,names_to = "topic", value
   rename("service_name" = service_name.x) %>%
   left_join(long_topiccy_words, by = c("doc_id", "topic_n")) %>%
   ungroup()
-write.csv(modelled_comments,"data/modelled_comments30.csv")
+write.csv(modelled_comments,"data/modelled_comments25.csv")
 
 #create summary of model
 model_summary <- SummarizeTopics(model)
@@ -112,5 +117,46 @@ topics_by_service <- modelled_comments %>%
   select(service,year,topic,probability) %>%
   group_by(service,year,topic) %>%
   mutate(probability = sum(probability)) %>%
+  ungroup() %>%
   distinct()
 write.csv(topics_by_service, "data/topics_by_service.csv")
+
+#topics by crg
+topics_by_crg <- modelled_comments %>%
+  select(crg,year,topic,probability) %>%
+  group_by(crg,year,topic) %>%
+  mutate(probability = sum(probability)) %>%
+  distinct()
+write.csv(topics_by_crg, "data/topics_by_crg.csv")
+
+#topics by poc
+topics_by_poc <- modelled_comments %>%
+  select(poc,year,topic,probability) %>%
+  group_by(poc,year,topic) %>%
+  mutate(probability = sum(probability)) %>%
+  distinct()
+write.csv(topics_by_poc, "data/topics_by_poc.csv")
+
+save(model, file="data/model.RData") #it didn't work when I tried to load this in the shinyapp
+
+phi <- as.data.frame(model[["phi"]]) %>%
+  add_rownames(var = "topic") %>%
+  pivot_longer(!topic,names_to = "term", values_to = "probability") %>%
+  group_by(topic) %>%
+  slice_max(order_by = probability, n = 20) %>%
+  ungroup() %>%
+  mutate(term = str_replace(term,"_"," "),
+         type = "phi",
+         probability = probability*10)
+
+gamma <- as.data.frame(model[["gamma"]]) %>%
+  add_rownames(var = "topic") %>%
+  pivot_longer(!topic,names_to = "term", values_to = "probability") %>%
+  group_by(topic) %>%
+  slice_max(order_by = probability, n = 20) %>%
+  ungroup() %>%
+  mutate(term = str_replace(term,"_"," "),
+         type = "gamma")
+
+topic_terms <- rbind(phi,gamma)
+write.csv(topic_terms, "data/topic_terms.csv")
