@@ -7,9 +7,9 @@ library(textmineR)
 library(lubridate)
 library(ngram)
 
-source("C:/Users/EJones1/Data Science Accelerator/QSIS21TextAnalytics/functions/get_most_toppiccy_words.R")
+source("functions/get_most_toppiccy_words.R")
 
-qsis_self_declarations <- read.csv("C:/Users/EJones1/Data Science Accelerator/qsis_self_declarations.csv")
+qsis_self_declarations <- read.csv("data/qsis_self_declarations.csv")
 
 team_info <- qsis_self_declarations %>%
   distinct(team_id,team_name,subservice_name,service_name, crg,poc) %>%

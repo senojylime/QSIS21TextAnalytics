@@ -15,7 +15,7 @@ library(ngram)
 library(rsample)
 
 #read in sd data
-qsis_self_declarations <- read.csv("C:/Users/EJones1/Data Science Accelerator/qsis_self_declarations.csv")
+qsis_self_declarations <- read.csv("data/qsis_self_declarations.csv")
 
 #create dataset with distinct risk comments, compliance field and document id
 usercomments <- qsis_self_declarations %>%
