@@ -34,13 +34,15 @@ QSIS21TextAnalytics_server <- function(input, output, session) {
     topics_by_service %>%
       filter(service == input$service) %>%
       left_join(model_summary, by = "topic") %>%
-      ggplot(aes(y=reorder(topic,probability),
-                 x=probability,
+      ggplot(aes(x=reorder_within(topic,probability,year),
+                 y=probability,
                  fill=topic)) +
       geom_col() +
       theme(legend.position = "none") +
       facet_wrap(~year) +
-      geom_text(aes(x=0,y=reorder(topic,probability),label = top_terms_gamma), hjust = "inward")
+      geom_text(aes(y=0,x=reorder_within(topic,probability,year),label = top_terms_gamma), hjust = "inward") +
+      coord_flip() +
+      scale_x_reordered()
     
   })
   
