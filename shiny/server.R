@@ -13,28 +13,24 @@ observeEvent(input$crg,{
 
 output$topics_by_poc <- renderPlot({
   
-  modelled_comments_matrix <- modelled_comments %>%
-    filter(poc == input$poc) %>%
+  modelled_comments %>%
+    filter(poc == input$poc
+    ) %>%
     select(topic,service,probability) %>%
     group_by(service,topic) %>%
     mutate(probability = sum(probability)) %>%
+    distinct() %>%
+    ungroup() %>%
+    group_by(service) %>%
+    slice_max(order_by = probability, n = 10) %>%
     ungroup() %>%
     distinct() %>%
-    pivot_wider(names_from = "topic", values_from = "probability") %>%
-    remove_rownames() %>%
-    column_to_rownames(var = "service") %>%
-    as.matrix()
-  
-  #You may have noticed that order of both rows and columns is different compare to the native mtcar matrix.
-  #This is because heatmap() reorders both variables and observations using a clustering algorithm: 
-  #it computes the distance between each pair of rows and columns and try to order them by similarity.
-  #Moreover, the corresponding dendrograms are provided beside the heatmap. We can avoid it and just visualize the raw matrix: 
-  #use the Rowv and Colv arguments as follow.
-  
-  heatmap(modelled_comments_matrix,
-          Colv = NA,
-          Rowv = NA,
-          scale = "row")
+    ggplot(aes(x=topic,y=service,fill=probability))+
+    geom_tile() +
+    scale_x_discrete(position = "top") +
+    theme(axis.text.x = element_text(angle=90),
+          legend.position = "none") +
+    scale_fill_continuous(high = "#132B43", low = "#56B1F7")
   
 })
 
@@ -112,8 +108,8 @@ output$topics_by_crg <- renderPlot({
     
     topic_terms <- topic_terms %>%
       filter(topic == input$topic) %>%
-      select(term,probability)
+      select(term,size)
   
-  wordcloud2(data=topic_terms)
+  wordcloud2(data=topic_terms, size = 0.2)
   })
 }

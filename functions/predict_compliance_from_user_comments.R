@@ -7,11 +7,7 @@
 library(tidyverse)
 library(stringr)
 library(tidytext)
-library(quanteda)
-library(topicmodels)
 library(textmineR)
-library(lubridate)
-library(ngram)
 library(rsample)
 
 #read in sd data
@@ -19,12 +15,10 @@ qsis_self_declarations <- read.csv("data/qsis_self_declarations.csv")
 
 #create dataset with distinct risk comments, compliance field and document id
 usercomments <- qsis_self_declarations %>%
-  distinct(service_name,team_id,publish_on,indicator_name,user_comments,value) %>%
+  distinct(service_name,team_id,publish_on,indicator_code,user_comments,value) %>%
   na.omit() %>%
   mutate(document = row_number(),
          compliance = ifelse(value == 1, "compliant","not compliant"))
-
-library(rsample)
 
 #create training and testing datasets
 usercomments_split <- usercomments %>%
@@ -38,7 +32,7 @@ tidy_usercomments <- usercomments %>%
   unnest_tokens(word, user_comments) %>%
   anti_join(stop_words, by = "word") %>%
   group_by(word) %>%
-  filter(n() > 3) %>% #keep comments which have word count higher than 6
+  filter(n() > 3) %>% #only keep words which appear more than 3 times in total over all comments
   ungroup()
 
 #transform from tidy to sparse

@@ -20,7 +20,7 @@ tidy_risk_comments <- tidy_the_data(qsis_self_declarations)
 write.csv(tidy_risk_comments,"data/tidied_risk_comments_tokenised.csv")
 
 for_dtm <- tidy_risk_comments %>%
-  distinct(team_id,publish_on,pr_risk_comments)
+  distinct(team_id,publish_on,pr_risk_comments,doc)
 write.csv(for_dtm,"data/tidied_risk_comments.csv")
 
 #set k
