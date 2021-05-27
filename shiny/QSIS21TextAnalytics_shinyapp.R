@@ -3,6 +3,7 @@ library(tidyverse)
 library(stringr)
 library(wordcloud2)
 library(mgcv)
+library(lubridate)
 
 source("functions/get_topic_phi_and_gamma.R")
 
@@ -24,6 +25,8 @@ model_summary <- SummarizeTopics(model)
 
 #get results from prediction and add back on metadata
 prediction <- read.csv(paste0("data/prediction",k_value,".csv"))
+prediction <- prediction %>% remove_rownames %>% column_to_rownames(var="X")
+topiccy_words <- read.csv(paste0("data/long_topiccy_words",k_value,".csv"))
 modelled_comments <- pivot_longer(prediction, -doc_id ,names_to = "topic", values_to = "probability") %>%
   group_by(doc_id) %>%
   arrange(-probability) %>%
@@ -33,9 +36,7 @@ modelled_comments <- pivot_longer(prediction, -doc_id ,names_to = "topic", value
   left_join(team_info, by = "team_id") %>%
   mutate(publish_on = dmy(publish_on),
          year = year(publish_on)) %>%
-  select(-service_name.y) %>%
-  rename("service_name" = service_name.x) %>%
-  left_join(long_topiccy_words, by = c("doc_id", "topic_n")) %>%
+  left_join(topiccy_words, by = c("doc_id", "topic_n")) %>%
   ungroup()
 
 topics_by_service <- modelled_comments %>%
