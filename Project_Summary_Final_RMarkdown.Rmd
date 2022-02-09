@@ -1,0 +1,698 @@
+---
+title: "QSIS21 Text Analytics - Data Science Accelerator Project"
+author: "Emily Jones"
+date: "24/06/2021"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+---
+
+```{r options, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, error = FALSE)
+```
+
+### Load R Packages
+
+```{r setup}
+library(tidyverse) #general data wrangling
+library(stringr) #string manipulation
+library(tidytext) #string manipulation based on tidy data principles
+library(textmineR) #LDA modelling and visualising
+library(lubridate) #date manipulation
+library(maps) #city names for stop words
+library(mgcv) #saving and loading non-dataframe R objects
+library(tm) # word stemming
+library(plotly) #interactive visualisations
+library(kableExtra) #nice looking tabular presentation
+library(LDAvis) #visualise a topic model
+library(rsample) #split data into training and testing datasets
+library(glmnet) #Lasso and Elastic-Net Regularized Generalized Linear Models
+library(yardstick) #confusion matrix
+library(tidylo) #Calculate and bind posterior log odds ratios
+library(textfeatures) #counting festures in a document
+library(randomForest)
+library(caret) #confusion matrix
+library(word2vec) #creating word vector matrices
+library(lsa) #cosine similarities
+
+setwd("C:/Users/EJones1/Data Science Accelerator/QSIS21TextAnalytics")
+qsis_self_declarations <- read.csv("data/qsis_self_declarations.csv")
+```
+
+# Introduction 
+
+## Project Outline
+
+NHS England specialised commissioned services make regular quantitative and qualitative submissions in order to monitor quality. Self-Declarations, whereby providers submit boolean responses to a set of service specific and contractually relevant indicators, are conducted annually. They can also occur as a bespoke collection when a new service specification is devised or in response to a national concern or issue highlighted by a provider or whistleblower. In addition to the compliance/non-compliance returns, providers also submit free-text responses in the form of general comments per indicator, overall comments and risk comments.
+
+Minimal analysis of this unstructured data has taken place to date and as such it is a largely untapped resource of the programme. The problem I am trying to solve is how to analyse this data in a way which provides narrative and comparative insight to stakeholders.
+
+The aims of the project are:
+
+- manipulate the textual data such that it provides an insightful summary
+- create a topic model for self declaration risk comments which can be used to see prominent themes and how they change over time
+- predict when a provider is non-compliant based on their comments
+- create an output which stakeholders can interact with
+- learn about methods for text analysis
+- develop some re-usable code which can be applied to other textual data in the NHS
+
+The project is first and foremost a proof of concept and skill building exercise but the aim is also to develop some methodologies and outputs which can be applied to the QSIS and other text data in future. The project also feeds into the ongoing QSIS21 project.
+
+## Stakeholder input
+
+![](which_comments.png)
+
+![](org_level.PNG)
+
+```{r}
+library(readxl)
+QSIS_Text_Analysis_responses <- read_excel("C:/Users/EJones1/Data Science Accelerator/QSIS21TextAnalytics/QSIS Text Analysis - responses.xlsx")
+
+QSIS_Text_Analysis_responses %>%
+  distinct(`Which of the below best describes your job role? (you can choose more than one option)`,
+           `How do you currently use the comments on QSIS?`,
+           `What type of information do you want to be able to extract from comments on QSIS?`) %>%
+  kable() %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T,
+                full_width = T) %>%
+  add_header_above(c("Stakeholder Responses"=3))
+  
+```
+
+# Topic Modelling Risk Comments 
+
+## Prepare the data
+
+### Tidy the data
+
+The steps below are a result of looking at the comments during later stages then returning to update this stage and re-running the code.
+
+```{r tidy the data}
+#concatenate service and subservice names
+#create a document id
+risk_comments <- qsis_self_declarations %>%
+  mutate(service = str_replace(paste(service_name,subservice_name),"NA",""), #create service name which is concatenation of service and subservice
+         doc_id = paste(team_id,publish_on)) %>% #create a document ID for each comment
+  distinct(service,team_id,publish_on,pr_risk_comments,score,poc,crg,team_name,doc_id)
+
+#a list of comments which are saying there are no risks to use as a filter later
+no_risks <- c("No patient related risk","No risk","no risk","No risk","no risk","no known patient risk","no current risks","No current risks","comment above","above comments","any risks","no major risks","no immediate or urgent risk",
+"All risks are entered onto the speciality risk register and managed in accordance with the Trust Risk Management Policy","no identifiable risk",
+"No identifiable risk","None relevent for this self declaration","No particular risks","not have any registered risks","see comments","No imminenet risk",
+"no immminent risk","no outstanding risk","No outstanding risk","any risks will be identified and validated","any immediate risks",
+"Please see the risks in the attached document","No identified risk","There are no known risk factors","No major risks",
+"The Trust monitors and mitigates all risks through the Trust risk register","No immediate or urgent risks identified.",
+"entered onto the speciality risk register and managed in accordance with the Trust Risk Management Policy",
+"attached document","Risks are managed via the well developed Trust governance processes","see Datix",
+"do not currently have risks","All risks are monitored through the risk and safety committee.",
+"currently no patient related risks on the risk register","comprehensive risk register in place which is reviewed monthly","Risk assessments in place","dynamic risk assessment approach","No identified service risk","No immediate risks","No immediate major or minor risks",
+"No significant risks","managed through the internal governance","As listed above","Please see",
+"identified risks are entered on to the speciality risk register","There are no Risk",
+"Patient related risks are documented","there are no open risks on the risk register","^none","no skin cancer risks",
+"submission documentation","No current specific risks for note here","plan demonstrates risks and was uploaded","no specific risks","no immediate risks","are managed in line with",
+"All risks are managed as per the trust SOP","quality markers rather than these self declarations","None identified",
+"no identified risk","^None","Nil to add","N/A - entered on behalf of Jane Lucas - 02.04.2019","See action plan uploaded",
+"No specific risks","Jamie Lee Ridgestone","no specific patient related risks")
+
+#remove some comments which don't have useful information
+#tokenise the data by word and add a word count column
+tidy_risk_comments <- risk_comments %>%
+  distinct(service,team_id,publish_on,pr_risk_comments,score,doc_id) %>%
+  na.omit()  %>%
+  mutate(word_count = sapply(strsplit(pr_risk_comments, " "), length)) %>%
+  unnest_tokens(word, pr_risk_comments, "words", drop = FALSE) %>%
+  mutate(stem = stemDocument(word)) %>%
+  filter(word_count > 3 & !(word %in% c("quoracy","capacity","recruitment","theatre","palliative","locum","staff","transport","data","staffing",
+                                        "attendance","itc","pathology","nurse","validation","lack"))
+         & !(word %in% c("patient","patients","trusts","trust",
+                         "risk","risks","register","service","services","nhs","nhse","nhsei",
+                         "oncology","unit","north","south","east","west","cumbria","identified","muo","cup","aos","nnu",
+                         "bapm","nicu","ccs","gynae","cheshire","mcht"))) %>%
+  filter(str_detect(pr_risk_comments,paste(no_risks, collapse = "|")) == FALSE) %>%
+  distinct()
+
+#create a list of domain specific stop words using the service names
+service_stop_words <- tidy_risk_comments %>%
+  distinct(word,stem) %>%
+  inner_join(qsis_self_declarations %>%
+               distinct(service_name) %>%
+               unnest_tokens(word, service_name, "words") %>%
+               mutate(stem = stemDocument(word)) %>%
+               distinct(stem),
+             by = "stem") %>%
+  distinct(word)
+
+glimpse(tidy_risk_comments)
+```
+
+### Create DTM
+
+The document IDs are the row names and the tokens (in this case unigrams or words) the column names. The values are a count. We remove stop words during this process and discard columns which have an overall count of < 5. Could also use the TF-IDF value in this matrix but in this instance found this did not add any value to the modelling so stayed with a count.
+
+```{r create_dtm}
+#create document term matrix
+for_dtm <- tidy_risk_comments %>%
+  distinct(team_id,publish_on,pr_risk_comments,doc_id)
+
+dtm <- textmineR::CreateDtm(doc_vec = for_dtm$pr_risk_comments, # character vector of documents
+                 doc_names = for_dtm$doc_id, # document names
+                 ngram_window = c(1,1), # minimum and maximum n-gram length
+                 stopword_vec = c(stopwords::stopwords("en"), # stopwords from tm
+                                  stopwords::stopwords(source = "smart"),
+                                  c("patient","patients","trusts","trust",
+                                    "risk","risks","register","service","services","nhs","nhse","nhsei",
+                                    "oncology","unit","north","south","east","west","cumbria","bristol","identified"
+                                    ,"muo","cup","aos","nnu","bapm","nicu","ccs","gynae","cheshire","mcht","uhmbt",
+                                    "catheter","pd","hiv","restorative","dentist","needle","insertion","catheters",
+                                    "door","swft","uhbristol","uhmbt","denmark","qeh","esht","ebus","dental","cddft",
+                                    "prh","ed","kgh","scbu","sihmds"), #domain specific stopwords
+                                  world.cities$name, #remove city names
+                                  service_stop_words$word), #remove service name words
+                 lower = TRUE, # lowercase - this is the default value
+                 remove_punctuation = TRUE, # punctuation - this is the default
+                 remove_numbers = TRUE, # numbers - this is the default
+                 verbose = FALSE, # Turn off status bar for this demo
+                 cpus = 2) # default is all available cpus on the system
+
+dtm <- dtm[,colSums(dtm) > 5]
+```
+
+## Create a model
+
+Run a set of LDA models with different numbers of topics and store them in a list. The below code creates six models with n topics from 5 to 10.
+
+```{r run_LDA, eval=FALSE}
+k_values=seq(5, 10,1)
+
+models <-  vector('list', length(k_values))
+
+for (i in seq(1:length(k_values))){
+  set.seed(1234)
+  model <- textmineR::FitLdaModel(dtm = dtm, 
+                       k = k_values[[i]],
+                       iterations = 600,
+                       burnin = 300,
+                       alpha = 0.06,
+                       beta = 0.05,
+                       calc_likelihood = TRUE,
+                       optimize_alpha = TRUE,
+                       calc_coherence = TRUE,
+                       calc_r2 = TRUE)
+  models[[i]] = model
+}
+```
+
+```{r}
+lda_models <- readRDS("project_summary_lda_topic_models.rds")
+```
+
+### Compare the models and select one
+
+In the plot the mean coherence of the topics in each model and the coefficient of determination for each model are shown for comparison. Coherence is a measure of the uniqueness of the topics, this is fairly similar across our models. R2 is a measure of the goodness of fit.
+
+The 8 topic model has the best mean coherence but the 10 topic model isn't far behind and has a better R2 so I chose the latter.
+
+```{r compare_models}
+#Let's compare the mean coherence and r2 of the models
+model_comparison = tibble(mean_coherence = unlist(lapply(lda_models,function(x) mean(x$coherence)))) %>%
+  bind_cols(n_topics = seq(5, 10,1)) %>%
+  bind_cols(tibble(r2 = unlist(lapply(lda_models,function(x) mean(x$r2))))) %>%
+  pivot_longer(-n_topics, names_to = "measure", values_to = "value")
+
+p <- ggplot(model_comparison, aes(x=n_topics,y=value,fill=measure)) +
+  geom_col(position = "dodge")+
+  scale_y_continuous(breaks=c(seq(5,10,1)))
+ggplotly(p)
+```
+
+Extract the 10 topic model from the list of models
+
+```{r select a model}
+lda_model <-lda_models[[6]]
+```
+
+### Summary of the topics in the model
+
+Some of the labels and top terms are clear (t_3 for example) but others will require some more investigation to understand them fully (t_9 for example).
+
+``` {r topic_summary}
+model_summary <- textmineR::SummarizeTopics(lda_model)
+kableExtra::kable(model_summary) %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T) %>%
+  add_header_above(c("Summary of Topics" = 7))
+```
+
+### Dendogram of topics
+
+This gives an idea of the structure of the model and which topics are related.
+
+``` {r}
+lda_model$linguistic <- textmineR::CalcHellingerDist(lda_model$phi)
+lda_model$hclust <- hclust(as.dist(lda_model$linguistic),"ward.D")
+lda_model$hclust$labels <- paste(lda_model$hclust$labels, lda_model$labels[,1])
+plot(lda_model$hclust)
+```
+
+### LDAvis
+
+This creates an interactive dashboard including an intertopic distance map and top relevant terms bar chart.
+
+```{r ldavis, eval = FALSE}
+doc_length <- rowSums(dtm)
+tf_mat <- TermDocFreq(dtm = dtm)
+
+json <- createJSON(phi = lda_model$phi,
+                   theta = lda_model$theta,
+                   doc.length = doc_length,
+                   vocab = tf_mat$term,
+                  term.frequency = tf_mat$term_freq)
+
+serVis(json, open.browser = TRUE)
+```
+
+## Apply the model
+
+### Predict topics for the risk comments
+
+```{r}
+#predict the probability that each risk comment is talkng about each topic
+set.seed(5678)
+prediction <- stats::predict(lda_model, dtm, method = "dot")
+prediction <- as.data.frame(prediction)
+prediction$doc_id <- rownames(prediction)
+
+#join back tot he metadata to create a dataframe ready to use for visualisations
+modelled_comments <- pivot_longer(prediction, -doc_id ,names_to = "topic", values_to = "probability") %>%
+  group_by(doc_id) %>%
+  arrange(-probability) %>%
+  mutate(topic_n = row_number()) %>%
+  ungroup() %>%
+  left_join(risk_comments, by = "doc_id") %>%
+  left_join(model_summary, by = "topic") %>%
+  mutate(publish_on = dmy(publish_on),
+         year = year(publish_on)) %>%
+  #left_join(topiccy_words, by = c("doc_id", "topic_n")) %>%
+  ungroup()
+
+sample_n(modelled_comments,20) %>%
+  kable() %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T) %>%
+  add_header_above(c("Examples of Potentially Non-compliance"=18))
+  
+```
+
+## Understand the model
+
+### Understanding the topics
+
+Take a closer look at some of the comments which are most likely to be in each topic and use them to come up with a sensible name and description of the topic.
+
+```{r}
+topiccy_comments <- modelled_comments %>%
+  select(topic, pr_risk_comments,probability) %>%
+  group_by(topic, .drop=FALSE) %>%
+  slice_max(order_by = probability,n = 60) %>%
+  ungroup %>%
+  distinct(topic,pr_risk_comments)
+
+sample_n(topiccy_comments,20) %>%
+  kable() %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T)
+  
+```
+
+Update the modelled_comments dataframe with the new names and descriptions decided upon.
+
+``` {r}
+modelled_comments$topic_name <- NA
+modelled_comments$topic_name[modelled_comments$topic == "t_1"] <- "Specialist Support & Facilities"
+modelled_comments$topic_name[modelled_comments$topic == "t_2"] <- "Governance"
+modelled_comments$topic_name[modelled_comments$topic == "t_3"] <- "Capacity & Demand"
+modelled_comments$topic_name[modelled_comments$topic == "t_4"] <- "Data & Patient Information"
+modelled_comments$topic_name[modelled_comments$topic == "t_5"] <- "Pathology & Diagnostics"
+modelled_comments$topic_name[modelled_comments$topic == "t_6"] <- "Finance"
+modelled_comments$topic_name[modelled_comments$topic == "t_7"] <- "Prescribing"
+modelled_comments$topic_name[modelled_comments$topic == "t_8"] <- "MDT"
+modelled_comments$topic_name[modelled_comments$topic == "t_9"] <- "Availability & Accessibility"
+modelled_comments$topic_name[modelled_comments$topic == "t_10"] <- "Recruitment & Retention"
+
+modelled_comments$topic_description <- NA
+modelled_comments$topic_description[modelled_comments$topic == "t_1"] <- "This topic is about the lack of dietetic, social worker, speech and language, dental hygienist, and psychologist availability. It also include availability fo treatments/services on site."
+modelled_comments$topic_description[modelled_comments$topic == "t_2"] <- "This topic is about risk management policies such as incident reporting, risk registers and risk assessments. The comments with a high prevalence of this topic tend to be relating information about processes for risk management rather than about a specific current risk."
+modelled_comments$topic_description[modelled_comments$topic == "t_3"] <- "This topic includes issues such as increasing demand and higher volumes of referrals as well as delayed discharges and longer waiting times. It relates to capacity at all points within the patient pathway but mainly to RTT."
+modelled_comments$topic_description[modelled_comments$topic == "t_4"] <- "This topic is about problems with data collection, management and reporting. The comments which have a high probability of being in this topic may refer to difficulties with submission as well as analysis. Patient information is also included in this topic, referring to issues with decision making, assessment and flagging due to information accessibility and/or sharing inadequacies."
+modelled_comments$topic_description[modelled_comments$topic == "t_5"] <- "This topic is about delays with pathology samples, molecular testing and histology reports."
+modelled_comments$topic_description[modelled_comments$topic == "t_6"] <- "This topic is about finance, it covers funding, service delivery costs, equipment maintenance, staffing, tendering and/or bids."
+modelled_comments$topic_description[modelled_comments$topic == "t_7"] <- "This topic relates to e-prescribing in particular."
+modelled_comments$topic_description[modelled_comments$topic == "t_8"] <- "This topic refers to MDT quoracy, attendance and cover."
+modelled_comments$topic_description[modelled_comments$topic == "t_9"] <- "This topic is about the availability and accessibility of treatments and follow ups."
+modelled_comments$topic_description[modelled_comments$topic == "t_10"] <- "This topic covers staffing, vacancies, recruitment, staff rations and shortages."
+
+modelled_comments %>%
+  distinct(topic_name,topic_description) %>%
+  arrange(topic_name) %>%
+  kable() %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T)
+write_csv(modelled_comments,"project_summary_modelled_comments.csv")
+```
+Looking back at the dendrogram we can also group these topics in the following way:
+
+1. Availability & Accessibility
+2. Governance
+3. Resources = Recruitment & Retention, Specialist Support & Facilities and MDT
+4. Capacity = Capacity & Demand and Pathology & Diagnostics
+5. Systems = Governance, Data & Patient Information and Prescribing
+
+## Create some visualisations
+
+These visualisations can be used in an interactive flexdashboard for stakeholders to use in identifying the greatest risks to CRGs and services.
+
+### Heatmap of topic probability for one CRG by service
+
+A heat map showing the prevalence of each topic by service for all years. We can see that the main risk commented on by Specialised Cancer Surgery service providers is MDT, particularly for Brain and Central Nervous System services and Testicular Cancer services. The next most prevalent risk within this CRG is Capacity and Demand.
+
+```{r crg_heatmap, fig.width=12}
+p <-modelled_comments %>%
+  select(crg,service,topic_name,topic_description,probability) %>%
+  group_by(crg,service,topic_name,topic_description,.drop=FALSE) %>%
+  summarise(p = sum(probability), n = n()) %>%
+  mutate (p = p/n * 100) %>%
+  ungroup() %>%
+  distinct() %>%
+  filter(crg == "Specialised Cancer Surgery") %>%
+  ggplot(aes(x=topic_name,y=service,fill=p, text = str_wrap(topic_description,width=40)))+
+  geom_tile() +
+  scale_x_discrete(position = "top") +
+  theme(axis.text.x = element_text(angle=90)) +
+  scale_fill_continuous(high = "#132B43", low = "#56B1F7")
+ggplotly(p,
+         tooltip = "all")
+```
+
+### Topics for a single service over time
+
+Looking at the Cancer: Brain and Central Nervous System (Adult) Spinal service alone over time we can see that MDT has been the most prevalent risk throughout the 4 years of data collection. Capacity & Demand was the next most prevalent risk in 2016 but this changed to Pathology in 2019. Data & Patient Information also became a more prevalent risk in 2019.
+
+``` {r service line chart, fig.width=12}
+df <-modelled_comments %>%
+  filter(service == "Cancer: Brain and Central Nervous System (Adult) Spinal") %>%
+  select(service,year,topic_name,topic_description,probability) %>%
+  group_by(service,year,topic_name,topic_description,.drop=FALSE) %>%
+  summarise(p = sum(probability), n = n()) %>%
+  mutate (p = p/n * 100) %>%
+  ungroup() %>%
+  distinct()
+
+fig <- plot_ly(
+  df,
+  x = ~year, 
+  y = ~p, 
+  group_by = ~topic_name,
+  color = ~topic_name,
+  hoverinfo = 'text',
+  hovertext = ~paste(topic_name,":",str_wrap(topic_description,width=50)),
+  type = 'scatter',
+  mode='line',
+  colorscale='Viridis'
+)
+
+fig = fig %>% 
+  layout(
+  xaxis = list(title = 'Year'),
+  yaxis = list (title = 'Topic prevalence')
+)
+
+fig
+
+```
+
+# Predicting Non-Compliance
+
+I looked at the differences in vocabulary and text features between comments for providers which were compliant and non-compliant with the indicators they were submitting against and attempted to predict actual non-compliance in cases when providers said they were compliant. This attempt has not been very successful. However, this could be to do with the quality of the training dataset. Due to time constraints I was not able to validate the submissions.
+
+## Vocabulary or Text Features?
+
+### Vocabulary
+
+#### Prepare the data
+
+```{r prep_data}
+#create dataset with distinct user comments, compliance field and document id
+usercomments <- qsis_self_declarations %>%
+  distinct(service_name,team_id,publish_on,indicator_name,indicator_code,user_comments,value) %>%
+  na.omit() %>%
+  mutate(document = row_number(),
+         compliance = ifelse(value == 1, "compliant","not compliant")) %>%
+  rename("text" = user_comments)
+```
+
+#### Compare the vocabulary in the comments for compliant and non-compliant submissions
+
+The log odds weighted of words in the compliance and non-compliance categories suggest there is an intelligible difference between the words used in comments in the two categories. However, the top 6 words in the not compliant category seem very clear but compliant is not so clear.
+
+```{r}
+user_comments_lo <- usercomments %>%
+  unnest_tokens(word,text) %>%
+  count(compliance,word) %>%
+  bind_log_odds(compliance,word,n) %>%
+  arrange(-log_odds_weighted)
+
+user_comments_lo %>%
+  group_by(compliance) %>%
+  slice_max(log_odds_weighted, n = 30) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, log_odds_weighted)) %>%
+  ggplot(aes(log_odds_weighted, word, fill = compliance))+
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~compliance, scales = "free")
+```
+
+### Text Features
+
+#### Create text features matrix
+
+The textfeatures function counts occurences features such as grammar, capitalisation, punctuation and sentiment within each comment.
+
+Comparing the text features of compliant and non-compliant comments there does appear to be a distinction and it provides more variety to work with than only considering vocabulary so let's continue with this.
+
+
+``` {r, out.width = "100%"}
+tf <- textfeatures(
+  usercomments,
+  sentiment = TRUE,
+  word_dims = 0,
+  normalize = FALSE,
+  verbose = FALSE
+)
+
+#This is filter out features with 10 occurrences or less
+tf <- tf[,colSums(tf) > 10] 
+
+# add on compliance info
+tf_comments <- tf %>%
+  bind_cols(usercomments %>% 
+              select(compliance,document)) %>%
+  mutate(compliance = as.factor(compliance))
+
+#are there differences between the text features of compliant and non-compliant which we can see
+tf_diff <- tf %>%
+  bind_cols(usercomments) %>%
+  group_by(compliance) %>%
+  summarise(across(starts_with("n_"), mean)) %>%
+  pivot_longer(starts_with("n_"), names_to = "text_feature") %>%
+  #filter(value > 0.01) %>%
+  mutate(text_feature = fct_reorder(text_feature, -value)) %>%
+  ggplot(aes(compliance, value, fill = compliance)) +
+  geom_col(position = "dodge", alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~text_feature, scales = "free", ncol = 6) +
+  labs(x = NULL, y = "Mean text features per comment") +
+  theme(axis.text.x = element_blank(),
+        legend.position = "top")
+ggplotly(tf_diff)
+```
+#### Create training and test data sets
+
+```{r}
+sample = caTools::sample.split(tf_comments$compliance, SplitRatio = .75)
+train = subset(tf_comments, sample == TRUE)
+test  = subset(tf_comments, sample == FALSE)
+```
+
+#### Create a model
+
+```{r, eval = FALSE}
+
+#-The first parameter specifies our formula: Species ~ . (we want to predict Species using each of the remaining columns of data).
+#-ntree defines the number of trees to be generated. It is typical to test a range of values for this parameter (i.e. 100,200,300,400,500) and choose the one that minimises the OOB estimate of error rate.
+#-mtry is the number of features used in the construction of each tree. These features are selected at random, which is where the "random" in "random forests" comes from. The default value for this parameter, when performing classification, is sqrt(number of features).
+#-importance enables the algorithm to calculate variable importance.
+train <- train[,-26]
+set.seed(547)
+rf <- randomForest(
+  compliance ~ .,
+  data=train,
+  ntree = 100
+)
+
+```
+```{r}
+rf <- readRDS("rf_model.rds")
+```
+
+#### Apply the model
+
+Predict the compliance of submissions in the test dataset and produce a confusion matrix to assess the viability of the model.
+
+```{r}
+# Validation set assessment #1: looking at confusion matrix
+rf_prediction <- tibble(predict = predict(rf,test)) %>%
+  bind_cols(test)
+
+rf_prediction %>%
+  conf_mat(predict,compliance)
+```
+
+Take a look at a sample of the comments where they are submitted as compliant but our model predicts non-compliance.
+
+```{r}
+set.seed(2386)
+rf_prediction %>%
+  filter(compliance == "compliant" & predict == "not compliant") %>%
+  left_join(usercomments %>%
+              distinct(team_id,publish_on,service_name,indicator_name,text,document),
+            by = "document") %>%
+  mutate(word_count = sapply(strsplit(text, " "), length)) %>%
+  filter(word_count < 100) %>%
+  sample_n(20) %>%
+  select(document,compliance,predict,service_name,indicator_name,text) %>%
+  kable() %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T,
+                full_width = TRUE)
+
+```
+
+As we can see, the model is not very good at accurately predicting when a provider is actually non-compliant even though they have submitted as compliant. However, there is potential to improve the method through the use of validated training data and tweeking of the model.
+
+# Word Embedding
+
+Word embedding is a method which represents words as vectors so that similar words can be given similar representations.
+
+Create a word vector model for the risk comments and explore how word and document similarities can be used for insight.
+
+The below is a very preliminary exploration of the possibilities for using this approach.
+
+## Create a model
+
+```{r}
+word_vec_model <- word2vec(for_dtm$pr_risk_comments,
+                  type = "cbow",
+                  stopwords = c(stopwords::stopwords("en"),
+                                stopwords::stopwords(source = "smart"),
+                                c("patient","patients","trusts","trust",
+                                  "risk","risks","register","service","services","nhs","nhse","nhsei",
+                                  "oncology","unit","north","south","east","west","cumbria","bristol","identified"
+                                  ,"muo","cup","aos","nnu","bapm","nicu","ccs","gynae","cheshire","mcht","uhmbt",
+                                  "catheter","pd","hiv","restorative","dentist","needle","insertion","catheters",
+                                  "door","swft","uhbristol","uhmbt","denmark","qeh","esht","ebus","dental","cddft",
+                                  "prh","ed","kgh","scbu","sihmds")))
+```
+
+## Word Associations
+
+We can use the model to look up words and find terms associated with them within the risk comments.
+
+```{r}
+lookslike <- predict(word_vec_model, 
+                     "delay", 
+                     type = "nearest", 
+                     top_n = 10)
+lookslike
+
+lookslike2 <- predict(word_vec_model, 
+                     "absence", 
+                     type = "nearest", 
+                     top_n = 10)
+lookslike2
+
+lookslike3 <- predict(word_vec_model, 
+                     "incident", 
+                     type = "nearest", 
+                     top_n = 20)
+lookslike3
+```
+This method can also be used to find similar comments.
+
+``` {r}
+#create a function to compare a comment to all the other comments
+compare_vectors <- function(x, #everything we're comparing it to
+                            chosen_vector #vector we want to see what is similar to it
+                            ) {
+  lsa::cosine(x,chosen_vector)
+}
+
+#create doc2vec matrix
+risk_comments_distinct <- tidy_risk_comments %>% distinct(doc_id,pr_risk_comments)
+doc_vec <- doc2vec(word_vec_model, tolower(risk_comments_distinct[,1]))
+
+#use the function to find the most similar comments to the first comment in our dataset
+similarity <- apply(doc_vec, #for every row in this matrix
+                1, #doing it by rows 2 = columns
+                compare_vectors, #function see above
+                x=doc_vec[1,]) #put the first row of test in the first argument of the function
+most_similar <- head(order(similarity[-1],decreasing = TRUE),5)
+
+risk_comments_distinct[1,] %>%
+  kable() %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T,
+                full_width = TRUE)
+risk_comments_distinct[most_similar,] %>%
+  kable() %>%
+  kable_classic(c("striped", "hover"),
+                fixed_thead = T,
+                full_width = TRUE)
+```
+
+# Learning Outcomes
+
+- collecting free text data in a structured format
+The risk comments collected during self declaration often include content which isn't necessarily about risks, analysis of these comments in future could be more useful if they were collected in a more structured way such as splitting into questions 'What are your current risks?' and 'How are you mitigating these?'
+
+- choosing the number of topics
+I spent time trying to create a model with a large number of topics in an attempt to capture granularity but in the found that the simplicity of a smaller number of topics was better. I've learnt some methods for assessing the best number of topics to use but also the importance of spending time digging into the data to interpret a model rather than relying on the model summary outputs such as top-terms phi and gamma.
+
+- knowledge of methodologies
+I have a much better awareness of the packages and methods available when doing text analysis in R and how to apply them. This will allow me to translate user needs in to questions which I can ask and answer with code.
+
+# Future Developments
+
+- topic modeling  
+Create topic models for other textual datasets.
+
+- predicting non-compliance  
+Creation of a validated training dataset so that I can properly assess the effectiveness of the prediction modelling.
+
+- word embedding  
+Using it to look at providers nationally and regionally who are dealing with similar risks and to look at a single providers risk over time and whether the same risks continue or new ones arise.
+
+- git hub 
+Spend some time developing the functions I have so that myself and others can use them in future.
+
+- dashboard  
+Add in all the Proggrammes of Care and potentially some pages which use the prediction model and word embedding approaches.
+
+# Evaluation
+
+- sharing this RMarkdown and the example dashboard with colleagues to get feedback
+- writing a blog for the NHS-R Community website
+- sharing the git hub page for the project with colleagues for input
+# THE END
