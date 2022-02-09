@@ -1,0 +1,93 @@
+---
+title: "QSIS21 Text ANalytics - Data Science Accelerator Project"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(crosstalk)
+library(tidyverse)
+library(plotly)
+
+setwd("C:/Users/EJones1/Data Science Accelerator/QSIS21TextAnalytics")
+
+modelled_comments <- read.csv("project_summary_modelled_comments.csv")
+
+heatmap_data <- modelled_comments %>%
+  select(crg,service,topic_name,topic_description,probability) %>%
+  group_by(crg,service,topic_name,topic_description,.drop=FALSE) %>%
+  summarise(p = sum(probability), n = n()) %>%
+  mutate (p = p/n * 100) %>%
+  ungroup() %>%
+  distinct()
+heatmap_data$crg <- as.factor(heatmap_data$crg)
+shared_heatmap_data <- SharedData$new(heatmap_data, ~crg, group = "Select crg")
+
+time_series_data <-modelled_comments %>%
+   select(service,year,topic_name,topic_description,probability) %>%
+   group_by(service,year,topic_name,topic_description,.drop=FALSE) %>%
+   summarise(p = sum(probability), n = n()) %>%
+   mutate (p = p/n * 100) %>%
+   ungroup() %>%
+   distinct()
+time_series_data$service <- as.factor(time_series_data$service)
+ shared_time_series_data <- SharedData$new(time_series_data, ~service, group = "Select service")
+```
+
+```{r}
+filter_select("crg","Select crg",shared_heatmap_data,~crg, multiple = FALSE)
+filter_select("service","Select service",shared_time_series_data,~service, multiple = FALSE)
+```
+
+Row 
+-----------------------------------------------------------------------
+
+### CRG Heatmap
+
+```{r}
+
+```
+
+### Service Time series
+```{r}
+ time_series <- plot_ly(
+   shared_time_series_data,
+   x = ~year, 
+   y = ~p, 
+   group_by = ~topic_name,
+   color = ~topic_name,
+   hoverinfo = 'text',
+   hovertext = ~paste(topic_name,":",str_wrap(topic_description,width=50)),
+   type = 'scatter',
+   mode='line',
+   colorscale='Viridis'
+ )
+ 
+ time_series <-  time_series %>% 
+   layout(
+   xaxis = list(title = 'Year'),
+   yaxis = list (title = 'Topic prevalence')
+ )
+ 
+ time_series
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Compliance Scores by Service (2019)
+
+```{r}
+
+```
+
+### Comments
+
+```{r}
+
+```
+
